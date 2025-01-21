@@ -1,4 +1,4 @@
-import type { UsersCreateInput, Users } from "@/db/schemas/users";
+import type { Users, UsersCreateInput } from '@/db/schemas/users';
 
 export interface UsersRepository {
 	// biome-ignore lint/suspicious/noConfusingVoidType: <explanation>

@@ -1,15 +1,15 @@
-import { fastify } from "fastify";
-import { appRoutes } from "./http/routes";
+import { fastify } from 'fastify';
+import { appRoutes } from './http/routes';
 
+import fastifySwagger from '@fastify/swagger';
+import fastifySwaggerUI from '@fastify/swagger-ui';
 import {
-	jsonSchemaTransform,
+	ZodTypeProvider,
 	createJsonSchemaTransform,
+	jsonSchemaTransform,
 	serializerCompiler,
 	validatorCompiler,
-	ZodTypeProvider,
-} from "fastify-type-provider-zod";
-import fastifySwagger from "@fastify/swagger";
-import fastifySwaggerUI from "@fastify/swagger-ui";
+} from 'fastify-type-provider-zod';
 
 export const app = fastify();
 app.setValidatorCompiler(validatorCompiler);
@@ -18,9 +18,9 @@ app.setSerializerCompiler(serializerCompiler);
 app.register(fastifySwagger, {
 	openapi: {
 		info: {
-			title: "Authenticator API",
-			description: "Sample backend service",
-			version: "1.0.0",
+			title: 'Authenticator API',
+			description: 'Sample backend service',
+			version: '1.0.0',
 		},
 		servers: [],
 	},
@@ -28,7 +28,7 @@ app.register(fastifySwagger, {
 });
 
 app.register(fastifySwaggerUI, {
-	routePrefix: "/doc",
+	routePrefix: '/doc',
 });
 
 app.register(appRoutes);

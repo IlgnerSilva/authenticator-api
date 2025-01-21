@@ -1,43 +1,52 @@
-import type { FastifyRequest, FastifyReply, FastifyInstance } from "fastify";
-import { hash } from "bcrypt";
-import { RegisterUseCase } from "@/use-cases/user/register.usecase";
-import { DrizzleUsersRepository } from "@/repositories/drizzle/drizzle-users-repository";
-import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { z } from "zod";
-import { UserAlreadyExistsError } from "@/use-cases/_errors/user-already-exists-error";
+import { DrizzleUsersRepository } from '@/repositories/drizzle/drizzle-users-repository';
+import { RegisterUseCase } from '@/usecases/user/register.usecase';
+import { RouterError } from '@/utils/_errors/router-errors';
+import { UserAlreadyExistsError } from '@/utils/_errors/user-already-exists-error';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
+import { z } from 'zod';
 
 const bodySchema = z.object({
-	name: z.string(),
-	email: z.string().email("Email is invalid."),
-	password_hash: z.string().nonempty(),
+	name: z.string().nonempty("Name can't be empty."),
+	email: z.string().email('Email is invalid.'),
+	password: z.string().min(6, 'Password must be at least 6 characters long.'),
 });
 
 export async function registerUserRoute(app: FastifyInstance) {
-	app
-		.withTypeProvider<ZodTypeProvider>()
-		.post(
-			"/register",
-			{ schema: { tags: ["auth"], body: bodySchema } },
-			async (request: FastifyRequest, replay: FastifyReply) => {
-				const { email, password_hash, name } = bodySchema.parse(request.body);
+	app.after(() => {
+		app.withTypeProvider<ZodTypeProvider>().route({
+			method: 'POST',
+			url: '/register',
+			schema: {
+				body: bodySchema,
+			},
+			handler: async (request: FastifyRequest, replay: FastifyReply) => {
+				const { email, password, name } = bodySchema.parse(request.body);
 
 				try {
 					const usersRepository = new DrizzleUsersRepository();
 					const registerUseCase = new RegisterUseCase(usersRepository);
-
-					registerUseCase.execute({
+					await registerUseCase.execute({
 						name,
 						email,
-						password_hash: await hash(password_hash, 6),
+						password,
 					});
+
+					return replay.status(201).send();
 				} catch (err) {
-					if (err instanceof UserAlreadyExistsError) {
+					if (err instanceof UserAlreadyExistsError)
 						return replay
 							.status(409)
 							.send({ error: true, message: err.message });
-					}
-					return replay.status(500).send();
+
+					return replay
+						.status(500)
+						.send({ error: true, message: 'Internal server error.' });
 				}
 			},
-		);
+			errorHandler(error, request, reply) {
+				new RouterError(error, reply).handle();
+			},
+		});
+	});
 }

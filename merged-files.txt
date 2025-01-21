@@ -1,0 +1,374 @@
+app.ts
+
+import { fastify } from 'fastify';
+import { appRoutes } from './http/routes';
+
+import fastifySwagger from '@fastify/swagger';
+import fastifySwaggerUI from '@fastify/swagger-ui';
+import {
+	ZodTypeProvider,
+	createJsonSchemaTransform,
+	jsonSchemaTransform,
+	serializerCompiler,
+	validatorCompiler,
+} from 'fastify-type-provider-zod';
+
+export const app = fastify();
+app.setValidatorCompiler(validatorCompiler);
+app.setSerializerCompiler(serializerCompiler);
+
+app.register(fastifySwagger, {
+	openapi: {
+		info: {
+			title: 'Authenticator API',
+			description: 'Sample backend service',
+			version: '1.0.0',
+		},
+		servers: [],
+	},
+	transform: jsonSchemaTransform,
+});
+
+app.register(fastifySwaggerUI, {
+	routePrefix: '/doc',
+});
+
+app.register(appRoutes);
+
+
+db/index.ts
+
+import { drizzle } from "drizzle-orm/postgres-js";
+import * as productsTable from "./schemas/products";
+import * as userProductsTable from "./schemas/userProducts";
+import * as usersTable from "./schemas/users";
+import { env } from "@/env";
+
+export const db = drizzle({
+	connection: env.DATABASE_URL,
+	logger: env.NODE_ENV === "dev",
+	schema: { ...productsTable, ...userProductsTable, ...usersTable },
+});
+
+
+db/schemas/products.ts
+
+import { pgTable, varchar, timestamp } from "drizzle-orm/pg-core";
+import { randomUUID } from "node:crypto";
+
+export const productsTable = pgTable("products", {
+	id: varchar({ length: 32 })
+		.primaryKey()
+		.$defaultFn(() => randomUUID()),
+	name: varchar({ length: 10 }).notNull(),
+	description: varchar({ length: 100 }),
+	created_at: timestamp("created_at").defaultNow(),
+	updated_at: timestamp("updated_at").$onUpdate(() => new Date()),
+});
+
+
+db/schemas/userProducts.ts
+
+import { pgTable, varchar, timestamp } from "drizzle-orm/pg-core";
+import { randomUUID } from "node:crypto";
+import { usersTable } from "./users";
+import { productsTable } from "./products";
+
+export const userProductsTable = pgTable("user_products", {
+	id: varchar({ length: 32 })
+		.primaryKey()
+		.$defaultFn(() => randomUUID()),
+	user_id: varchar({ length: 32 })
+		.references(() => usersTable.id, { onDelete: "cascade" })
+		.notNull(),
+	product_id: varchar({ length: 32 })
+		.references(() => productsTable.id, { onDelete: "cascade" })
+		.notNull(),
+	expired_at: timestamp("updated_at").notNull(),
+	created_at: timestamp("created_at").defaultNow(),
+});
+
+
+db/schemas/users.ts
+
+import { randomUUID } from 'node:crypto';
+import {
+	boolean,
+	pgEnum,
+	pgTable,
+	text,
+	timestamp,
+	varchar,
+} from 'drizzle-orm/pg-core';
+import {
+	createInsertSchema,
+	createSelectSchema,
+	createUpdateSchema,
+} from 'drizzle-zod';
+import { productsTable } from './products';
+
+type OptionalFields<T> = {
+	[K in keyof T]: null | undefined extends T[K] ? T[K] | undefined : T[K];
+};
+
+const roleEnum = pgEnum('role_enum', ['ROOT', 'ADMIN', 'MEMBER']);
+export const usersTable = pgTable('users', {
+	id: varchar()
+		.primaryKey()
+		.$defaultFn(() => randomUUID()),
+	name: varchar({ length: 100 }).notNull(),
+	email: varchar({ length: 255 }).notNull().unique(),
+	password: varchar('password', { length: 255 }),
+	email_verified: boolean().default(false),
+	two_factor_authentication: boolean().default(false),
+	provider: varchar('provider', { length: 15 }),
+	provider_user_id: varchar('provider_user_id', { length: 255 }),
+	role: roleEnum(),
+	product_id: varchar({ length: 32 }).references(() => productsTable.id, {
+		onDelete: 'cascade',
+	}),
+	image: text(),
+	created_at: timestamp('created_at').defaultNow(),
+	updated_at: timestamp('updated_at').$onUpdate(() => new Date()),
+	active: boolean().default(true),
+});
+
+export type Users = typeof usersTable.$inferSelect;
+export type UsersCreateInput = OptionalFields<typeof usersTable.$inferInsert>;
+
+export const userSelectSchema = createSelectSchema(usersTable);
+export const userInsertSchema = createInsertSchema(usersTable, {
+	password: (schema) => schema.optional(),
+});
+export const userUpdateSchema = createUpdateSchema(usersTable);
+
+
+env/index.ts
+
+import { z } from "zod";
+import "dotenv/config";
+
+const envSchema = z.object({
+	NODE_ENV: z.enum(["dev", "test", "production"]).default("dev"),
+	PORT: z.coerce.number().default(3333),
+	DATABASE_URL: z.string(),
+});
+
+const _env = envSchema.safeParse(process.env);
+
+if (_env.success === false) {
+	console.error("❌ Invalid enviroments variables: ", _env.error.format());
+	throw new Error("Invalid enviroments variables");
+}
+
+export const env = _env.data;
+
+
+http/controllers/register.controller.ts
+
+import { DrizzleUsersRepository } from '@/repositories/drizzle/drizzle-users-repository';
+import { RouterError } from '@/usecases/_errors/router-errors';
+import { UserAlreadyExistsError } from '@/usecases/_errors/user-already-exists-error';
+import { RegisterUseCase } from '@/usecases/user/register.usecase';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import {
+	type ZodTypeProvider,
+	hasZodFastifySchemaValidationErrors,
+	isResponseSerializationError,
+} from 'fastify-type-provider-zod';
+import { type ZodError, z } from 'zod';
+
+const bodySchema = z.object({
+	name: z.string().nonempty("Name can't be empty."),
+	email: z
+		.string()
+		.nonempty("Email can't be empty.")
+		.email('Email is invalid.'),
+	password: z
+		.string()
+		.min(6, 'Password must be at least 6 characters long.')
+		.nonempty("Password can't be empty."),
+});
+
+export async function registerUserRoute(app: FastifyInstance) {
+	app.after(() => {
+		app.withTypeProvider<ZodTypeProvider>().route({
+			method: 'POST',
+			url: '/register',
+			schema: {
+				body: bodySchema,
+			},
+			handler: async (request: FastifyRequest, replay: FastifyReply) => {
+				const { email, password, name } = bodySchema.parse(request.body);
+
+				try {
+					const usersRepository = new DrizzleUsersRepository();
+					const registerUseCase = new RegisterUseCase(usersRepository);
+					await registerUseCase.execute({
+						name,
+						email,
+						password,
+					});
+
+					return replay.status(201).send();
+				} catch (err) {
+					if (err instanceof UserAlreadyExistsError)
+						return replay
+							.status(409)
+							.send({ error: true, message: err.message });
+
+					return replay
+						.status(500)
+						.send({ error: true, message: 'Internal server error.' });
+				}
+			},
+			errorHandler(error, request, reply) {
+				new RouterError(error, reply).handle();
+			},
+		});
+	});
+}
+
+
+http/routes.ts
+
+import type { FastifyInstance } from "fastify";
+import { registerUserRoute } from "@/http/controllers/register.controller";
+
+export async function appRoutes(app: FastifyInstance) {
+	app.register(registerUserRoute);
+}
+
+
+repositories/drizzle/drizzle-users-repository.ts
+
+import { db } from "@/db";
+import {
+	usersTable,
+	userInsertSchema,
+	type UsersCreateInput,
+} from "@/db/schemas/users";
+import type { UsersRepository } from "../users.repository";
+import { eq } from "drizzle-orm";
+
+export class DrizzleUsersRepository implements UsersRepository {
+	async create(data: UsersCreateInput) {
+		await db.insert(usersTable).values(userInsertSchema.parse(data));
+	}
+
+	async findByEmail(email: string) {
+		return await db.query.usersTable.findFirst({
+			where: eq(usersTable.email, email),
+		});
+	}
+
+	async findById(id: string) {
+		return await db.query.usersTable.findFirst({
+			where: eq(usersTable.id, id),
+		});
+	}
+}
+
+
+repositories/users.repository.ts
+
+import type { UsersCreateInput, Users } from "@/db/schemas/users";
+
+export interface UsersRepository {
+	// biome-ignore lint/suspicious/noConfusingVoidType: <explanation>
+	create(data: UsersCreateInput): Promise<Users | void>;
+	findById(id: string): Promise<Users | undefined>;
+	findByEmail(email: string): Promise<Users | undefined>;
+}
+
+export type UsersRepositoryRequest = UsersCreateInput;
+export type UsersRepositoryResponse = Users;
+
+
+server.ts
+
+import { app } from "@/app";
+import { env } from "@/env";
+
+app
+	.listen({
+		host: "0.0.0.0",
+		port: env.PORT,
+	})
+	.then(() => {
+		console.log(`🚀 Server is running in http://localhost:${env.PORT}.`);
+	});
+
+
+usecases/_errors/router-errors.ts
+
+import type { FastifyError, FastifyReply } from 'fastify';
+import {
+	hasZodFastifySchemaValidationErrors,
+	isResponseSerializationError,
+} from 'fastify-type-provider-zod';
+
+export class RouterError {
+	constructor(
+		protected error: FastifyError,
+		protected reply: FastifyReply,
+	) {}
+
+	handle() {
+		if (hasZodFastifySchemaValidationErrors(this.error)) {
+			return this.reply.code(400).send({
+				error: true,
+				statusCode: 400,
+				message: 'Validation error.',
+				details: {
+					issues: this.error.validation.map((issue) => issue.message),
+				},
+			});
+		}
+
+		if (isResponseSerializationError(this.error)) {
+			return this.reply.code(500).send({
+				error: true,
+				message: 'An internal error has occurred.',
+				statusCode: 500,
+				details: {
+					issues: this.error.cause.issues,
+				},
+			});
+		}
+	}
+}
+
+
+usecases/_errors/user-already-exists-error.ts
+
+export class UserAlreadyExistsError extends Error {
+	constructor() {
+		super("User already exists.");
+	}
+}
+
+
+usecases/user/register.usecase.ts
+
+import type {
+	UsersRepository,
+	UsersRepositoryRequest,
+} from '@/repositories/users.repository';
+import { hash } from 'bcrypt';
+import { UserAlreadyExistsError } from '../_errors/user-already-exists-error';
+
+export class RegisterUseCase {
+	constructor(private usersRepository: UsersRepository) {}
+	async execute(data: UsersRepositoryRequest) {
+		const userExists = await this.usersRepository.findByEmail(data.email);
+
+		if (userExists) throw new UserAlreadyExistsError();
+
+		if (data.password) data.password = await hash(data.password, 6);
+
+		await this.usersRepository.create(data);
+	}
+}
+
+
